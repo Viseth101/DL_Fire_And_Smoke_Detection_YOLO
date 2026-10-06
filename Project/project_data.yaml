@@ -1,0 +1,11 @@
+path: datasets/sayedgamal99/smoke-fire-detection-yolo/versions/1
+train: data/train/images
+val: data/val/images
+test: data/test/images
+names:
+- smoke
+- fire
+nc: 2
+train_count: 14122
+val_count: 3099
+test_count: 4306
