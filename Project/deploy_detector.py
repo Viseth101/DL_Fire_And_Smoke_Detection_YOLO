@@ -165,8 +165,7 @@ def resolve_model_path(requested_path=None):
     """
     1. Checks if user passed a custom --model path.
     2. Checks portable 'Video Deploy/Models/yolo26s_best.onnx'.
-    3. Checks local training folder and automatically copies weights into 'Video Deploy/Models/'
-       so the project folder is immediately portable for other computers!
+    3. Checks local training folder and automatically copies weights into 'Video Deploy/Models/' so the project folder is immediately portable for other computers!
     """
     models_dir = os.path.join(VIDEO_DEPLOY_DIR, "Models")
     os.makedirs(models_dir, exist_ok=True)
@@ -330,15 +329,23 @@ def select_source_interactively():
         print("Invalid choice, defaulting to sample_fire3.mp4.")
         return DEFAULT_VIDEO_PATH
 
+# =====================================================================
+# DEFAULT DEPLOYMENT SETTINGS (Change your defaults here in ONE place!)
+# =====================================================================
+DEFAULT_CONF = 0.10          # Minimum confidence threshold (0.0 to 1.0)
+DEFAULT_BUFFER = 5           # Rolling window size (frames)
+DEFAULT_HITS = 4             # Required detections inside buffer to trigger
+DEFAULT_COOLDOWN = 60        # Seconds between notifications
+DEFAULT_SAVE_VIDEO = False   # Set True to auto-save video, False to disable
 
 def run_deployment(
     model_path=None,
     source=None,
-    conf_thres=0.45,
-    buffer_size=5,
-    required_hits=4,
-    cooldown=60,
-    save_output=True,
+    conf_thres=DEFAULT_CONF,
+    buffer_size=DEFAULT_BUFFER,
+    required_hits=DEFAULT_HITS,
+    cooldown=DEFAULT_COOLDOWN,
+    save_output=DEFAULT_SAVE_VIDEO,
     enable_alerts=False,
     no_gui=False
 ):
@@ -500,11 +507,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Portable Smoke & Fire YOLO Deployment Script")
     parser.add_argument("--model", type=str, default=None, help="Optional custom path to ONNX or PT weights")
     parser.add_argument("--source", type=str, default=None, help="Video path, webcam index (0), or RTSP URL.")
-    parser.add_argument("--conf", type=float, default=0.45, help="Minimum confidence threshold")
-    parser.add_argument("--buffer", type=int, default=5, help="Temporal rolling window size (frames)")
-    parser.add_argument("--hits", type=int, default=4, help="Required detections inside buffer to trigger alarm")
-    parser.add_argument("--cooldown", type=int, default=60, help="Cooldown seconds between notification alerts")
-    parser.add_argument("--no-save", action="store_true", help="Disable saving output video")
+    parser.add_argument("--conf", type=float, default=DEFAULT_CONF, help="Minimum confidence threshold")
+    parser.add_argument("--buffer", type=int, default=DEFAULT_BUFFER, help="Temporal rolling window size (frames)")
+    parser.add_argument("--hits", type=int, default=DEFAULT_HITS, help="Required detections inside buffer to trigger alarm")
+    parser.add_argument("--cooldown", type=int, default=DEFAULT_COOLDOWN, help="Cooldown seconds between notification alerts")
+    parser.add_argument("--save", action="store_true", default=DEFAULT_SAVE_VIDEO, help="Save processed output video")
     parser.add_argument("--enable-alerts", action="store_true", help="Enable live Telegram/Webhook API calls")
     parser.add_argument("--no-gui", action="store_true", help="Run headless without opening GUI window")
     args = parser.parse_args()
@@ -516,7 +523,7 @@ if __name__ == "__main__":
         buffer_size=args.buffer,
         required_hits=args.hits,
         cooldown=args.cooldown,
-        save_output=not args.no_save,
+        save_output=args.save,
         enable_alerts=args.enable_alerts,
         no_gui=args.no_gui
     )
