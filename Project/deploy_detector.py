@@ -68,6 +68,7 @@ if platform.system() == "Linux":
     os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
 import cv2
+import numpy as np
 import requests
 from PIL import Image
 from ultralytics import YOLO
@@ -94,15 +95,78 @@ FALLBACK_TRAIN_ONNX = os.path.join(
 # =====================================================================
 # 1. NATIVE TKINTER LIVE VIDEO PLAYER (CROSS-PLATFORM)
 # =====================================================================
+def draw_hud(img, hud, scale=1.0):
+    """
+    Draws the translucent status bar onto `img` (in place).
+    `scale` sets the text size (1.0 = 720p-equivalent); the whole HUD shrinks
+    automatically if a line would not fit the image width, so it is never clipped.
+    `hud` is a list of (text, bgr_color, base_font_scale, base_thickness).
+    """
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    h, w = img.shape[:2]
+    base_pad, base_gap, base_top = 15, 9, 10
+
+    widest = max(cv2.getTextSize(t, font, fs, th)[0][0] for (t, _, fs, th) in hud)
+    if widest + 2 * base_pad > 0:
+        scale = min(scale, w / (widest + 2 * base_pad))
+    scale = max(scale, 0.3)
+
+    pad = int(base_pad * scale)
+    y = int(base_top * scale)
+    positions = []
+    for (text, _, fs, th) in hud:
+        (_, text_h), baseline = cv2.getTextSize(text, font, fs * scale, max(1, round(th * scale)))
+        y += text_h
+        positions.append(y)
+        y += baseline + int(base_gap * scale)
+    bar_h = min(h, y)
+
+    roi = img[0:bar_h, :]
+    roi[:] = cv2.addWeighted(np.full_like(roi, 20), 0.65, roi, 0.35, 0)
+
+    for (text, color, fs, th), ty in zip(hud, positions):
+        cv2.putText(img, text, (pad, ty), font, fs * scale, color, max(1, round(th * scale)), cv2.LINE_AA)
+
+
+def _enable_windows_dpi_awareness():
+    """Without this, Windows bitmap-stretches the Tk window on high-DPI screens (blurry video)."""
+    if platform.system() != "Windows":
+        return
+    try:
+        import ctypes
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)  # per-monitor aware
+        except Exception:
+            ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
+
 class LiveVideoWindow:
     """
     Opens a live GUI window using Tkinter + PIL on Windows, macOS, and WSL2.
+
+    - Opens fitted to ~80% of the screen (or `display_size`), preserving aspect ratio.
+    - Freely resizable; the video is rescaled and letterboxed to the window on every frame.
+    - HUD is drawn after scaling, so text stays a constant, readable size.
+    - Keys: Q quit, P pause, F / F11 toggle fullscreen, Esc leaves fullscreen (or quits).
     """
-    def __init__(self, title="Smoke & Fire Detection HUD"):
+    SCREEN_FILL = 0.80
+    MIN_SIZE = (320, 180)
+
+    def __init__(self, title="Smoke & Fire Detection HUD", display_size=None, fullscreen=False):
         self.available = False
         self.quit_requested = False
         self.paused = False
+        self.fullscreen = False
+        self.display_size = display_size
+        self.start_fullscreen = fullscreen
+        self._sized = False
+        self._target = None
+        self._last = None
+        self._rendered_size = None
         try:
+            _enable_windows_dpi_awareness()
             import tkinter as tk
             from PIL import ImageTk
             self.tk = tk
@@ -110,40 +174,107 @@ class LiveVideoWindow:
 
             self.root = tk.Tk()
             self.root.title(title)
+            self.root.configure(bg="black")
+            self.root.minsize(*self.MIN_SIZE)
             self.root.protocol("WM_DELETE_WINDOW", self._on_close)
-            self.root.bind("<q>", lambda e: self._on_close())
-            self.root.bind("<Q>", lambda e: self._on_close())
-            self.root.bind("<Escape>", lambda e: self._on_close())
-            self.root.bind("<p>", lambda e: self._toggle_pause())
-            self.root.bind("<P>", lambda e: self._toggle_pause())
+            for key in ("<q>", "<Q>"):
+                self.root.bind(key, lambda e: self._on_close())
+            for key in ("<p>", "<P>"):
+                self.root.bind(key, lambda e: self._toggle_pause())
+            for key in ("<f>", "<F>", "<F11>"):
+                self.root.bind(key, lambda e: self._toggle_fullscreen())
+            self.root.bind("<Escape>", lambda e: self._on_escape())
 
-            self.label = tk.Label(self.root, bg="black")
+            self.label = tk.Label(self.root, bg="black", bd=0, highlightthickness=0, padx=0, pady=0)
             self.label.pack(fill=tk.BOTH, expand=True)
+
+            # HUD text size in screen pixels: 1.0 at 96 DPI, larger on high-DPI displays
+            self.ui_scale = min(3.0, max(1.0, self.root.winfo_fpixels("1i") / 96.0))
             self.available = True
         except Exception as e:
             print(f"\n⚠️ Live GUI window unavailable ({e}). Continuing in headless recording mode...\n")
             self.available = False
 
+    # ---------- key handlers ----------
     def _on_close(self):
         self.quit_requested = True
 
     def _toggle_pause(self):
         self.paused = not self.paused
 
-    def show(self, frame_bgr):
+    def _toggle_fullscreen(self):
+        self.fullscreen = not self.fullscreen
+        self.root.attributes("-fullscreen", self.fullscreen)
+
+    def _on_escape(self):
+        if self.fullscreen:
+            self._toggle_fullscreen()
+        else:
+            self._on_close()
+
+    # ---------- sizing ----------
+    def _apply_initial_geometry(self, vid_w, vid_h):
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        if self.display_size:
+            win_w, win_h = self.display_size
+        else:
+            s = min(self.SCREEN_FILL * screen_w / vid_w, self.SCREEN_FILL * screen_h / vid_h)
+            win_w, win_h = int(vid_w * s), int(vid_h * s)
+        win_w = max(self.MIN_SIZE[0], win_w)
+        win_h = max(self.MIN_SIZE[1], win_h)
+        x = max(0, (screen_w - win_w) // 2)
+        y = max(0, (screen_h - win_h) // 2)
+        self._target = (win_w, win_h)
+        self.root.geometry(f"{win_w}x{win_h}+{x}+{y}")
+        if self.start_fullscreen:
+            self._toggle_fullscreen()
+        self.root.update()
+        self._sized = True
+
+    def _canvas_size(self):
+        w, h = self.label.winfo_width(), self.label.winfo_height()
+        if w < 2 or h < 2:  # not mapped yet
+            return self._target
+        return w, h
+
+    # ---------- drawing ----------
+    def _render(self):
+        frame_bgr, hud = self._last
+        win_w, win_h = self._canvas_size()
+        vid_h, vid_w = frame_bgr.shape[:2]
+
+        s = min(win_w / vid_w, win_h / vid_h)
+        new_w, new_h = max(1, int(vid_w * s)), max(1, int(vid_h * s))
+        interp = cv2.INTER_AREA if s < 1 else cv2.INTER_LINEAR
+        scaled = cv2.resize(frame_bgr, (new_w, new_h), interpolation=interp)
+        if hud:
+            draw_hud(scaled, hud, self.ui_scale)
+
+        canvas = np.zeros((win_h, win_w, 3), dtype=np.uint8)
+        x0, y0 = (win_w - new_w) // 2, (win_h - new_h) // 2
+        canvas[y0:y0 + new_h, x0:x0 + new_w] = scaled
+
+        imgtk = self.ImageTk.PhotoImage(image=Image.fromarray(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)))
+        self.label.imgtk = imgtk
+        self.label.configure(image=imgtk)
+        self._rendered_size = (win_w, win_h)
+
+    def show(self, frame_bgr, hud=None):
         if not self.available or self.quit_requested:
             return False
         try:
-            rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-            img = Image.fromarray(rgb)
-            imgtk = self.ImageTk.PhotoImage(image=img)
-            self.label.imgtk = imgtk
-            self.label.configure(image=imgtk)
+            if not self._sized:
+                self._apply_initial_geometry(frame_bgr.shape[1], frame_bgr.shape[0])
+            self._last = (frame_bgr, hud)
+            self._render()
             self.root.update_idletasks()
             self.root.update()
 
             while self.paused and not self.quit_requested:
                 self.root.update()
+                if self._canvas_size() != self._rendered_size:
+                    self._render()  # keep resizing/fullscreen responsive while paused
                 time.sleep(0.05)
             return not self.quit_requested
         except Exception:
@@ -347,7 +478,9 @@ def run_deployment(
     cooldown=DEFAULT_COOLDOWN,
     save_output=DEFAULT_SAVE_VIDEO,
     enable_alerts=False,
-    no_gui=False
+    no_gui=False,
+    display_size=None,
+    fullscreen=False
 ):
     resolved_model_path = resolve_model_path(model_path)
     print(f"🚀 Loading model: {resolved_model_path}")
@@ -368,9 +501,13 @@ def run_deployment(
     if not cap.isOpened():
         sys.exit(f"\n❌ Error: Unable to open video source '{source}'. Check path or camera connection.")
 
-    gui = None if no_gui else LiveVideoWindow("Smoke & Fire Detection HUD (Press 'Q' to Quit, 'P' to Pause)")
+    gui = None if no_gui else LiveVideoWindow(
+        "Smoke & Fire Detection HUD (Q: Quit | P: Pause | F/F11: Fullscreen)",
+        display_size=display_size,
+        fullscreen=fullscreen,
+    )
     if gui and gui.available:
-        print("✅ Live Popup Window started! Press 'Q' inside the window to quit, 'P' to pause.")
+        print("✅ Live Popup Window started! Q = quit, P = pause, F/F11 = fullscreen, Esc = exit fullscreen.")
     else:
         save_output = True
 
@@ -441,27 +578,31 @@ def run_deployment(
         if fire_confirmed:
             active_hazards.append("FIRE")
 
+        # Box line/label size relative to source resolution (720p = 1.0) so boxes
+        # stay visible after the frame is scaled down for display.
+        box_s = max(1.0, frame.shape[0] / 720.0)
+        box_thick = max(2, round(3 * box_s))
+        box_font = 0.65 * box_s
+        box_font_thick = max(1, round(2 * box_s))
         for (cls_id, conf, x1, y1, x2, y2) in detections:
             if (cls_id == 0 and smoke_confirmed) or (cls_id == 1 and fire_confirmed):
                 color = colors[cls_id]
                 label = f"{classes[cls_id]} {conf:.2f}"
-                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
-                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
-                cv2.rectangle(frame, (x1, y1 - 24), (x1 + tw + 6, y1), color, -1)
-                cv2.putText(frame, label, (x1 + 3, y1 - 6),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, box_thick)
+                (tw, th), base = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, box_font, box_font_thick)
+                lbl_h = th + base + int(6 * box_s)
+                ly = y1 if y1 - lbl_h >= 0 else y1 + lbl_h  # flip inside box if it would leave the frame
+                cv2.rectangle(frame, (x1, ly - lbl_h), (x1 + tw + int(6 * box_s), ly), color, -1)
+                cv2.putText(frame, label, (x1 + int(3 * box_s), ly - base - int(2 * box_s)),
+                            cv2.FONT_HERSHEY_SIMPLEX, box_font, (255, 255, 255), box_font_thick, cv2.LINE_AA)
 
         if active_hazards:
             dispatcher.trigger_alert(active_hazards, frame, max_conf_in_frame)
 
-        # --- Draw Real-Time HUD Overlay ---
+        # --- Build Real-Time HUD (drawn per-output at the right size) ---
         curr_time = time.time()
         fps = 1.0 / max(curr_time - prev_time, 1e-5)
         prev_time = curr_time
-
-        overlay = frame.copy()
-        cv2.rectangle(overlay, (0, 0), (frame.shape[1], 85), (20, 20, 20), -1)
-        cv2.addWeighted(overlay, 0.65, frame, 0.35, 0, frame)
 
         if active_hazards:
             status_str = f"STATUS: HAZARD CONFIRMED ({' + '.join(active_hazards)})"
@@ -470,23 +611,24 @@ def run_deployment(
             status_str = "STATUS: MONITORING (CLEAR)"
             status_col = (0, 255, 0)
 
-        cv2.putText(frame, status_str, (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.75, status_col, 2)
-        cv2.putText(
-            frame,
-            f"FPS: {fps:.1f} | Conf: {conf_thres:.2f} | Buffer: Smoke({sum(smoke_buffer)}/{buffer_size}) Fire({sum(fire_buffer)}/{buffer_size})",
-            (15, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (220, 220, 220), 1
-        )
-
         cd_rem = dispatcher.cooldown_remaining()
         cd_text = f"Alert Cooldown: {cd_rem:.0f}s" if cd_rem > 0 else "Alert System: READY"
         cd_col = (0, 165, 255) if cd_rem > 0 else (180, 255, 180)
-        cv2.putText(frame, cd_text, (15, 76), cv2.FONT_HERSHEY_SIMPLEX, 0.50, cd_col, 1)
+
+        hud = [
+            (status_str, status_col, 0.75, 2),
+            (f"FPS: {fps:.1f} | Conf: {conf_thres:.2f} | Buffer: Smoke({sum(smoke_buffer)}/{buffer_size}) "
+             f"Fire({sum(fire_buffer)}/{buffer_size})", (220, 220, 220), 0.52, 1),
+            (cd_text, cd_col, 0.50, 1),
+        ]
 
         if out_writer is not None:
-            out_writer.write(frame)
+            rec_frame = frame.copy()
+            draw_hud(rec_frame, hud, scale=max(1.0, rec_frame.shape[0] / 720.0))
+            out_writer.write(rec_frame)
 
         if gui and gui.available:
-            keep_going = gui.show(frame)
+            keep_going = gui.show(frame, hud)
             if not keep_going:
                 break
         else:
@@ -514,6 +656,19 @@ if __name__ == "__main__":
     parser.add_argument("--save", action="store_true", default=DEFAULT_SAVE_VIDEO, help="Save processed output video")
     parser.add_argument("--enable-alerts", action="store_true", help="Enable live Telegram/Webhook API calls")
     parser.add_argument("--no-gui", action="store_true", help="Run headless without opening GUI window")
+
+    def _parse_size(value):
+        try:
+            w, h = (int(v) for v in value.lower().split("x"))
+            if w <= 0 or h <= 0:
+                raise ValueError
+            return (w, h)
+        except ValueError:
+            raise argparse.ArgumentTypeError("expected WIDTHxHEIGHT, e.g. 1280x720")
+
+    parser.add_argument("--display-size", type=_parse_size, default=None,
+                        help="Initial window size, e.g. 1280x720 (default: fit ~80%% of the screen)")
+    parser.add_argument("--fullscreen", action="store_true", help="Start the live window in fullscreen")
     args = parser.parse_args()
 
     run_deployment(
@@ -525,5 +680,7 @@ if __name__ == "__main__":
         cooldown=args.cooldown,
         save_output=args.save,
         enable_alerts=args.enable_alerts,
-        no_gui=args.no_gui
+        no_gui=args.no_gui,
+        display_size=args.display_size,
+        fullscreen=args.fullscreen
     )
