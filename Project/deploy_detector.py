@@ -14,50 +14,145 @@ from collections import deque
 # =====================================================================
 # 0. AUTO-INSTALLER FOR PORTABILITY ON ANY COMPUTER
 # =====================================================================
+# CUDA 12.8+ is required for RTX 50-series (Blackwell). cu130 = newest PyTorch (driver >= 580),
+# cu128 = fallback for older drivers (>= 570).
+TORCH_CUDA_INDEX = {"cu130": "https://download.pytorch.org/whl/cu130",
+                    "cu128": "https://download.pytorch.org/whl/cu128"}
+AUTO_YES = any(a in ("-y", "--yes") for a in sys.argv[1:])
+
+
+def _confirm(question):
+    """Ask a yes/no question. Defaults to 'no' if stdin is not interactive."""
+    if AUTO_YES:
+        print(f"{question} [y/N]: y  (--yes)")
+        return True
+    try:
+        return input(f"{question} [y/N]: ").strip().lower() in ("y", "yes")
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+
+
+def _pip_cmd(packages, extra_args=()):
+    # Use 'uv pip' if available (uv venvs have no pip), otherwise standard 'pip'.
+    if shutil.which("uv"):
+        return ["uv", "pip", "install", "--python", sys.executable, *extra_args, *packages]
+    return [sys.executable, "-m", "pip", "install", *extra_args, *packages]
+
+
+def _has_nvidia_gpu():
+    """Returns (gpu_name, driver_major) or (None, None)."""
+    if not shutil.which("nvidia-smi"):
+        return None, None
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader"],
+                             capture_output=True, text=True, timeout=10)
+        if out.returncode != 0 or not out.stdout.strip():
+            return None, None
+        name, driver = [s.strip() for s in out.stdout.strip().splitlines()[0].split(",")[:2]]
+        return name, int(driver.split(".")[0])
+    except Exception:
+        return None, None
+
+
 def ensure_dependencies():
     """
-    Checks if required Python packages and GUI libraries are installed.
-    If run on a new computer, automatically installs them before starting.
+    Checks required Python packages, GUI libraries and GPU support.
+    Lists everything that is missing and asks for confirmation before installing.
     """
     required_packages = {
-        "cv2": "opencv-python",
-        "ultralytics": "ultralytics",
-        "onnx": "onnx",
-        "onnxruntime": "onnxruntime",
-        "PIL": "Pillow",
-        "requests": "requests",
+        # module: (pip name, purpose)
+        "cv2": ("opencv-python", "video decoding & drawing"),
+        "ultralytics": ("ultralytics", "YOLO inference"),
+        "onnx": ("onnx", "ONNX model export"),
+        "onnxruntime": ("onnxruntime", "ONNX inference on CPU"),
+        "PIL": ("Pillow", "GUI image display"),
+        "requests": ("requests", "Telegram alerts"),
     }
-
-    missing_pip = []
-    for module_name, pip_name in required_packages.items():
+    missing = []
+    for module_name, (pip_name, purpose) in required_packages.items():
         try:
             __import__(module_name)
         except ImportError:
-            missing_pip.append(pip_name)
+            missing.append((pip_name, purpose))
 
-    if missing_pip:
-        print(f"📦 Installing missing Python packages for portability: {', '.join(missing_pip)}...")
-        # Use 'uv pip' if available in environment, otherwise standard 'pip'
-        if shutil.which("uv"):
-            cmd = ["uv", "pip", "install", *missing_pip]
-        else:
-            cmd = [sys.executable, "-m", "pip", "install", *missing_pip]
-        subprocess.check_call(cmd)
-        print("✅ Python dependencies installed successfully!")
+    # --- GPU check: NVIDIA card present but PyTorch is missing or a CPU-only build? ---
+    gpu_name, driver_major = _has_nvidia_gpu()
+    torch_note = None
+    try:
+        import torch
+        torch_ok = True
+        if gpu_name and not torch.cuda.is_available():
+            torch_note = f"installed build is CPU-only ({torch.__version__})"
+    except ImportError:
+        torch_ok = False
+        torch_note = "not installed"
+    want_cuda_torch = bool(gpu_name and torch_note)
+    if not torch_ok and not gpu_name:
+        missing.append(("torch torchvision", "deep learning backend (CPU build)"))
 
-    # Check Tkinter on Linux/WSL (Windows & macOS include tkinter with Python by default)
+    # --- Tkinter on Linux/WSL (Windows & macOS ship it with Python) ---
+    tk_apt = None
     if platform.system() == "Linux":
         try:
             import tkinter  # noqa: F401
         except ImportError:
-            py_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
-            tk_pkg = f"python{py_ver}-tk"
-            print(f"⚙️ Linux detected without '{tk_pkg}'. Attempting auto-install via apt...")
-            try:
-                subprocess.run(["sudo", "apt-get", "update"], check=False)
-                subprocess.run(["sudo", "apt-get", "install", "-y", tk_pkg, "python3-tk"], check=False)
-            except Exception as e:
-                print(f"⚠️ Could not auto-install {tk_pkg}: {e}")
+            tk_apt = f"python{sys.version_info.major}.{sys.version_info.minor}-tk"
+
+    if not missing and not want_cuda_torch and not tk_apt:
+        return
+
+    print("\n" + "=" * 62)
+    print("📦 DEPENDENCY CHECK")
+    print("=" * 62)
+    print(f"Python environment: {sys.executable}\n")
+
+    # 1. Required packages
+    if missing:
+        print("Required packages missing:")
+        for pip_name, purpose in missing:
+            print(f"   • {pip_name:<20} - {purpose}")
+        cmd = _pip_cmd([p for name in missing for p in name[0].split()])
+        print(f"\n   Command: {' '.join(cmd)}")
+        if _confirm("\nInstall the required packages now?"):
+            subprocess.check_call(cmd)
+            print("✅ Required packages installed.\n")
+        else:
+            sys.exit("❌ Cannot run without the required packages. Install them and run again.")
+
+    # 2. Optional GPU acceleration
+    if want_cuda_torch:
+        print(f"\n🎮 NVIDIA GPU detected: {gpu_name}")
+        print(f"   PyTorch {torch_note}, so detection would run on the CPU (slow).")
+        print("   Optional install for GPU acceleration:")
+        cuda_tag = "cu130" if (driver_major or 0) >= 580 else "cu128"
+        print(f"   • torch + torchvision ({cuda_tag} CUDA build for driver {driver_major}, "
+              f"~3 GB download, replaces CPU build)")
+        if shutil.which("uv"):
+            reinstall = ["--reinstall-package", "torch", "--reinstall-package", "torchvision"]
+        else:
+            reinstall = ["--force-reinstall"]
+        # Only the PyTorch index: mixing in PyPI lets the resolver pick a newer CPU-only wheel.
+        cmd = _pip_cmd(["torch", "torchvision"], [*reinstall, "--index-url", TORCH_CUDA_INDEX[cuda_tag]])
+        print(f"\n   Command: {' '.join(cmd)}")
+        if _confirm("\nInstall GPU-enabled PyTorch now?"):
+            subprocess.check_call(cmd)
+            print("✅ CUDA PyTorch installed. Restarting script to load it...\n")
+            os.execv(sys.executable, [sys.executable, *sys.argv])
+        else:
+            if not torch_ok:
+                sys.exit("❌ PyTorch is required. Install it (CPU or CUDA build) and run again.")
+            print("➡️  Skipping. Continuing on CPU.\n")
+
+    # 3. Tkinter for the live window (Linux only)
+    if tk_apt:
+        print(f"\n🪟 Live video window needs '{tk_apt}' (system package).")
+        print(f"   Command: sudo apt-get install -y {tk_apt} python3-tk")
+        if _confirm("Install it now with apt (requires sudo)?"):
+            subprocess.run(["sudo", "apt-get", "update"], check=False)
+            subprocess.run(["sudo", "apt-get", "install", "-y", tk_apt, "python3-tk"], check=False)
+        else:
+            print("➡️  Skipping. The script will run headless and save the output video instead.\n")
 
 
 # Run dependency check immediately before third-party imports
@@ -149,16 +244,20 @@ class LiveVideoWindow:
     - Opens fitted to ~80% of the screen (or `display_size`), preserving aspect ratio.
     - Freely resizable; the video is rescaled and letterboxed to the window on every frame.
     - HUD is drawn after scaling, so text stays a constant, readable size.
-    - Keys: Q quit, P pause, F / F11 toggle fullscreen, Esc leaves fullscreen (or quits).
+    - Keys: Q quit, P pause, F / F11 toggle fullscreen, Esc leaves fullscreen (or quits),
+            + / - playback speed, 0 reset to 1x, M toggle max speed (no frame pacing).
     """
     SCREEN_FILL = 0.80
     MIN_SIZE = (320, 180)
+    SPEED_STEPS = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0]
 
-    def __init__(self, title="Smoke & Fire Detection HUD", display_size=None, fullscreen=False):
+    def __init__(self, title="Smoke & Fire Detection HUD", display_size=None, fullscreen=False, speed=1.0):
         self.available = False
         self.quit_requested = False
         self.paused = False
         self.fullscreen = False
+        self.max_speed = speed <= 0          # speed 0 = run as fast as the model allows
+        self.speed = speed if speed > 0 else 1.0
         self.display_size = display_size
         self.start_fullscreen = fullscreen
         self._sized = False
@@ -184,6 +283,13 @@ class LiveVideoWindow:
             for key in ("<f>", "<F>", "<F11>"):
                 self.root.bind(key, lambda e: self._toggle_fullscreen())
             self.root.bind("<Escape>", lambda e: self._on_escape())
+            for key in ("<plus>", "<equal>", "<KP_Add>"):
+                self.root.bind(key, lambda e: self._step_speed(+1))
+            for key in ("<minus>", "<underscore>", "<KP_Subtract>"):
+                self.root.bind(key, lambda e: self._step_speed(-1))
+            self.root.bind("<Key-0>", lambda e: self._set_speed(1.0))
+            for key in ("<m>", "<M>"):
+                self.root.bind(key, lambda e: self._toggle_max_speed())
 
             self.label = tk.Label(self.root, bg="black", bd=0, highlightthickness=0, padx=0, pady=0)
             self.label.pack(fill=tk.BOTH, expand=True)
@@ -211,6 +317,31 @@ class LiveVideoWindow:
             self._toggle_fullscreen()
         else:
             self._on_close()
+
+    def _set_speed(self, value):
+        self.speed = value
+        self.max_speed = False
+
+    def _step_speed(self, direction):
+        steps = self.SPEED_STEPS
+        if direction > 0:
+            nxt = next((s for s in steps if s > self.speed + 1e-6), steps[-1])
+        else:
+            nxt = next((s for s in reversed(steps) if s < self.speed - 1e-6), steps[0])
+        self._set_speed(nxt)
+
+    def _toggle_max_speed(self):
+        self.max_speed = not self.max_speed
+
+    def wait(self, seconds):
+        """Sleep for frame pacing while keeping the window responsive."""
+        end = time.perf_counter() + seconds
+        while not self.quit_requested and not self.paused:
+            remaining = end - time.perf_counter()
+            if remaining <= 0:
+                break
+            self.root.update()
+            time.sleep(min(0.004, remaining))
 
     # ---------- sizing ----------
     def _apply_initial_geometry(self, vid_w, vid_h):
@@ -292,8 +423,10 @@ class LiveVideoWindow:
 # =====================================================================
 # 2. PORTABLE MODEL PATH RESOLVER & AUTO-COPIER
 # =====================================================================
-def resolve_model_path(requested_path=None):
+def resolve_model_path(requested_path=None, prefer_pt=False):
     """
+    0. If running on a CUDA GPU (prefer_pt), uses the PyTorch .pt weights when available
+       (FP16 on GPU is much faster than CPU-only onnxruntime).
     1. Checks if user passed a custom --model path.
     2. Checks portable 'Video Deploy/Models/yolo26s_best.onnx'.
     3. Checks local training folder and automatically copies weights into 'Video Deploy/Models/' so the project folder is immediately portable for other computers!
@@ -304,6 +437,10 @@ def resolve_model_path(requested_path=None):
     # 1. Explicit custom path
     if requested_path and os.path.exists(requested_path):
         return requested_path
+
+    # 1b. GPU available: prefer the .pt weights
+    if prefer_pt and os.path.exists(PORTABLE_MODEL_PT):
+        return PORTABLE_MODEL_PT
 
     # 2. Check portable ONNX inside Video Deploy/Models/
     if os.path.exists(PORTABLE_MODEL_ONNX):
@@ -342,6 +479,30 @@ def resolve_model_path(requested_path=None):
         f"To run on another computer without retraining, place 'yolo26s_best.onnx' inside:\n"
         f"  👉 {models_dir}\n"
     )
+
+
+def select_device(requested="auto"):
+    """
+    Returns (device, label). 'auto' picks CUDA GPU 0 when PyTorch can see one, else CPU.
+    """
+    import torch
+    req = str(requested).lower()
+    if req == "cpu":
+        return "cpu", "CPU"
+    if torch.cuda.is_available():
+        idx = 0 if req in ("auto", "cuda", "gpu") else int(req)
+        return idx, f"GPU: {torch.cuda.get_device_name(idx)}"
+    if req != "auto":
+        print(f"⚠️ Requested device '{requested}' but PyTorch has no CUDA support. Falling back to CPU.")
+    return "cpu", "CPU"
+
+
+def onnx_has_cuda():
+    try:
+        import onnxruntime as ort
+        return "CUDAExecutionProvider" in ort.get_available_providers()
+    except Exception:
+        return False
 
 
 # =====================================================================
@@ -480,12 +641,11 @@ def run_deployment(
     enable_alerts=False,
     no_gui=False,
     display_size=None,
-    fullscreen=False
+    fullscreen=False,
+    device="auto",
+    speed=1.0
 ):
-    resolved_model_path = resolve_model_path(model_path)
-    print(f"🚀 Loading model: {resolved_model_path}")
-    model = YOLO(resolved_model_path, task="detect")
-
+    # 1. Let the user pick the source first, before any heavy loading happens.
     if source is None:
         source = select_source_interactively()
     elif isinstance(source, str) and source.isdigit():
@@ -501,13 +661,44 @@ def run_deployment(
     if not cap.isOpened():
         sys.exit(f"\n❌ Error: Unable to open video source '{source}'. Check path or camera connection.")
 
+    # 2. Pick device and model.
+    device, device_label = select_device(device)
+    on_gpu = device != "cpu"
+    resolved_model_path = resolve_model_path(model_path, prefer_pt=on_gpu)
+
+    # ONNX on GPU needs onnxruntime-gpu; without it ultralytics would silently run on CPU.
+    if on_gpu and resolved_model_path.lower().endswith(".onnx") and not onnx_has_cuda():
+        print("⚠️ ONNX model selected but onnxruntime has no CUDA provider, so it runs on CPU. "
+              "Use the .pt weights for GPU speed.")
+        device, device_label, on_gpu = "cpu", "CPU", False
+
+    # FP16 on GPU: ~20% faster than FP32 with near-identical detections. CPU stays FP32.
+    use_fp16 = on_gpu and resolved_model_path.lower().endswith(".pt")
+    print(f"🚀 Loading model: {resolved_model_path}")
+    print(f"🧠 Inference device: {device_label}{' (FP16)' if use_fp16 else ''}")
+    model = YOLO(resolved_model_path, task="detect")
+    predict_kwargs = dict(imgsz=640, conf=conf_thres, verbose=False, device=device)
+    if use_fp16:
+        predict_kwargs["quantize"] = 16
+
+    # 3. Warm-up: the first GPU prediction pays a one-time setup cost (CUDA init, kernel
+    # selection: ~5-15 s). Doing it here keeps that pause out of the video, the FPS
+    # readout, and the smoke/fire timing buffers.
+    if on_gpu:
+        print("⏳ Preparing GPU (one-time, can take a few seconds)...")
+        t0 = time.perf_counter()
+        model.predict(np.zeros((640, 640, 3), dtype=np.uint8), **predict_kwargs)
+        print(f"✅ GPU ready in {time.perf_counter() - t0:.1f}s")
+
     gui = None if no_gui else LiveVideoWindow(
-        "Smoke & Fire Detection HUD (Q: Quit | P: Pause | F/F11: Fullscreen)",
+        "Smoke & Fire Detection HUD (Q: Quit | P: Pause | F/F11: Fullscreen | +/-: Speed | M: Max)",
         display_size=display_size,
         fullscreen=fullscreen,
+        speed=speed,
     )
     if gui and gui.available:
-        print("✅ Live Popup Window started! Q = quit, P = pause, F/F11 = fullscreen, Esc = exit fullscreen.")
+        print("✅ Live Popup Window started! Q = quit, P = pause, F/F11 = fullscreen, Esc = exit fullscreen,")
+        print("   +/- = playback speed, 0 = reset to 1x, M = toggle max speed.")
     else:
         save_output = True
 
@@ -536,7 +727,15 @@ def run_deployment(
     colors = {0: (180, 180, 180), 1: (0, 0, 255)}  # BGR: Smoke=Gray, Fire=Red
     classes = {0: "SMOKE", 1: "FIRE"}
 
-    prev_time = time.time()
+    # --- Playback pacing: video files play at their own FPS (x speed) when the model is faster.
+    # Live webcams/streams are already real-time, so they are never paced.
+    src_fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+    is_file = isinstance(source, str) and os.path.isfile(source)
+    pace_playback = bool(gui and gui.available and is_file and 1.0 <= src_fps <= 240.0)
+    next_due = None
+
+    prev_time = time.perf_counter()
+    infer_fps = disp_fps = 0.0
     frame_idx = 0
 
     while cap.isOpened():
@@ -546,7 +745,10 @@ def run_deployment(
             break
 
         frame_idx += 1
-        results = model.predict(frame, imgsz=640, conf=conf_thres, verbose=False)[0]
+        t_infer = time.perf_counter()
+        results = model.predict(frame, **predict_kwargs)[0]
+        inst = 1.0 / max(time.perf_counter() - t_infer, 1e-5)
+        infer_fps = inst if infer_fps == 0 else 0.9 * infer_fps + 0.1 * inst
 
         current_smoke = False
         current_fire = False
@@ -600,9 +802,20 @@ def run_deployment(
             dispatcher.trigger_alert(active_hazards, frame, max_conf_in_frame)
 
         # --- Build Real-Time HUD (drawn per-output at the right size) ---
-        curr_time = time.time()
-        fps = 1.0 / max(curr_time - prev_time, 1e-5)
+        curr_time = time.perf_counter()
+        inst = 1.0 / max(curr_time - prev_time, 1e-5)
+        disp_fps = inst if disp_fps == 0 else 0.9 * disp_fps + 0.1 * inst
         prev_time = curr_time
+
+        if not pace_playback:
+            speed_txt = "Playback: live" if not is_file else "Playback: max"
+        elif gui.max_speed:
+            speed_txt = "Playback: MAX (unpaced)"
+        else:
+            target = src_fps * gui.speed
+            speed_txt = f"Playback: {gui.speed:g}x ({target:.0f} FPS)"
+            if infer_fps < target * 0.95:
+                speed_txt += " - model-limited"
 
         if active_hazards:
             status_str = f"STATUS: HAZARD CONFIRMED ({' + '.join(active_hazards)})"
@@ -617,7 +830,9 @@ def run_deployment(
 
         hud = [
             (status_str, status_col, 0.75, 2),
-            (f"FPS: {fps:.1f} | Conf: {conf_thres:.2f} | Buffer: Smoke({sum(smoke_buffer)}/{buffer_size}) "
+            (f"Model: {infer_fps:.0f} FPS ({'GPU' if on_gpu else 'CPU'}) | Display: {disp_fps:.1f} FPS | {speed_txt}",
+             (220, 220, 220), 0.52, 1),
+            (f"Conf: {conf_thres:.2f} | Buffer: Smoke({sum(smoke_buffer)}/{buffer_size}) "
              f"Fire({sum(fire_buffer)}/{buffer_size})", (220, 220, 220), 0.52, 1),
             (cd_text, cd_col, 0.50, 1),
         ]
@@ -631,10 +846,24 @@ def run_deployment(
             keep_going = gui.show(frame, hud)
             if not keep_going:
                 break
+
+            if pace_playback and not gui.max_speed:
+                now = time.perf_counter()
+                if next_due is None:
+                    next_due = now
+                next_due += 1.0 / (src_fps * gui.speed)
+                delay = next_due - now
+                if delay > 0:
+                    gui.wait(delay)
+                elif delay < -0.25:
+                    # Model can't keep up (or we just resumed from pause): resync instead of bursting.
+                    next_due = now
+            else:
+                next_due = None
         else:
             if frame_idx % 20 == 0 or frame_idx == total_frames:
                 prog = f"{frame_idx}/{total_frames}" if total_frames > 0 else f"{frame_idx}"
-                print(f"⏳ Frame {prog} | Speed: {fps:.1f} FPS | {status_str}", end="\r")
+                print(f"⏳ Frame {prog} | Model: {infer_fps:.1f} FPS ({device_label}) | {status_str}", end="\r")
 
     cap.release()
     if out_writer is not None:
@@ -669,6 +898,12 @@ if __name__ == "__main__":
     parser.add_argument("--display-size", type=_parse_size, default=None,
                         help="Initial window size, e.g. 1280x720 (default: fit ~80%% of the screen)")
     parser.add_argument("--fullscreen", action="store_true", help="Start the live window in fullscreen")
+    parser.add_argument("--device", type=str, default="auto",
+                        help="Inference device: auto (GPU if available), cpu, or a GPU index like 0")
+    parser.add_argument("--speed", type=float, default=1.0,
+                        help="Video playback speed multiplier (1.0 = source FPS). 0 = as fast as the model can run")
+    parser.add_argument("-y", "--yes", action="store_true",
+                        help="Auto-confirm dependency installs (non-interactive setup)")
     args = parser.parse_args()
 
     run_deployment(
@@ -682,5 +917,7 @@ if __name__ == "__main__":
         enable_alerts=args.enable_alerts,
         no_gui=args.no_gui,
         display_size=args.display_size,
-        fullscreen=args.fullscreen
+        fullscreen=args.fullscreen,
+        device=args.device,
+        speed=args.speed
     )
