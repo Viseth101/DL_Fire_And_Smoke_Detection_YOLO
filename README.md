@@ -8,10 +8,7 @@ incident pipeline.
 
 ## Demo
 
-<video controls width="800">
-  <source src="assets/demo.mp4" type="video/mp4">
-  Your browser does not support embedded video. [Watch the deployment demo](assets/demo.mp4).
-</video>
+https://github.com/user-attachments/assets/84ad2822-1722-42f9-8ddf-2abe8c3a36d7
 
 ## Why this matters
 
