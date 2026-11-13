@@ -1,106 +1,143 @@
-# Smoke and Fire Detection with YOLO
+# Edge Smoke & Fire Detection with YOLOv26s
 
-A deep-learning project for detecting **smoke** and **fire** in images and video. It includes a Jupyter notebook for dataset exploration, model training, and evaluation, plus a standalone script for running detections on video files, webcams, and IP camera streams.
+Production-oriented computer vision deployment for detecting **smoke** and **fire**
+in CCTV, drone, and edge-camera video. The project began as a university deep
+learning benchmark and is now organized as a portable inference service with an
+ONNX model, temporal alert filtering, asynchronous notifications, and extension
+points for AWS and VLM verification.
 
-## Project contents
+## Why this matters
 
-| Path                                              | Description                                                                                                                  |
-| ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `Project/DL_Term_Project_Notebook.ipynb`        | Dataset analysis, preprocessing, YOLO model comparisons, tuning, test-set evaluation, and deployment notes.                  |
-| `Project/deploy_detector.py`                    | Interactive and command-line inference application with an optional live preview, annotated video output, and hazard alerts. |
-| `Project/Video Deploy/Models/yolo26s_best.onnx` | Portable ONNX model used by the deployment script by default.                                                                |
-| `Project/Video Deploy/Models/yolo26s_best.pt`   | PyTorch model weights.                                                                                                       |
-| `Project/Video Deploy/Source/`                  | Sample videos for testing and other video inputs.                                                                            |
-| `Project/runs/detect/Smoke_Fire_Detection/`     | Training and evaluation outputs, including model weights, plots, and metrics.                                                |
+Frame-by-frame detectors can repeatedly flag a static background artifact. In
+this project, the detector produced 1,094 static-background false alarms during
+deployment testing. A K-of-N temporal persistence filter requires a hazard to
+appear consistently across recent frames before notifying an operator, reducing
+noise without changing the model weights.
 
-The detector uses class `0` for smoke and class `1` for fire. The dataset itself is not included; see [Training and evaluation](#training-and-evaluation) to obtain it.
+## Architecture
 
-## Requirements
-
-- Python with `pip`
-- A working video source (a sample video, webcam, or accessible IP camera stream)
-- Internet access the first time dependencies are installed
-
-The deployment script checks for and installs its missing Python packages at startup. To install them yourself in a virtual environment:
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install ultralytics opencv-python onnx onnxruntime Pillow requests
+```mermaid
+flowchart LR
+    A[Video stream<br/>file, webcam, RTSP] --> B[YOLOv26s ONNX]
+    B --> C[K-of-N temporal buffer]
+    C -->|confirmed hazard| D[Async Alert Dispatcher]
+    D --> E[Local snapshot + video output]
+    D --> F[Telegram webhook]
+    D -. optional .-> G[AWS S3 / SNS / webhook]
+    D -. optional .-> H[Gemini Flash VLM verification]
 ```
 
-For the notebook's Kaggle dataset download, also install:
+## Repository layout
+
+| Path | Purpose |
+| --- | --- |
+| `deploy_detector.py` | Root CLI entry point |
+| `src/config.py` | Portable paths, defaults, and `.env` loading |
+| `src/detector.py` | YOLO inference and K-of-N temporal buffering |
+| `src/notifier.py` | Threaded Telegram dispatcher and AWS/VLM hooks |
+| `src/gui.py` | Cross-platform Tkinter live HUD |
+| `models/` | Deployment ONNX and PyTorch weights |
+| `data/sample_videos/` | Small local inputs for demonstrations |
+| `data/outputs/` | Generated videos and alert snapshots (ignored by Git) |
+| `results/runs_summary/` | Lightweight experiment evidence |
+| `assets/` | README-ready evaluation plots |
+| `notebooks/` | Research, training, benchmarking, and evaluation notebook |
+
+## Benchmark results
+
+Validation mAP values and latency measurements are from the notebook benchmark:
+GPU results were measured on an RTX 5060 Laptop GPU; CPU results used four
+threads, batch size one, and 640px input. Total latency includes preprocessing,
+inference, and post-processing.
+
+| Model | mAP@50-95 | GPU latency (ms) | GPU FPS | 4-thread CPU latency (ms) | CPU FPS |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| YOLOv8s | 0.44614 | 4.18 | 239.3 | 72.47 | 13.80 |
+| YOLOv11s | 0.45594 | 4.03 | 248.0 | 60.07 | 16.65 |
+| YOLOv12s | 0.45620 | 5.10 | 195.9 | 80.78 | 12.38 |
+| YOLOv26n | 0.44571 | 2.22 | 449.7 | 22.92 | 43.62 |
+| **YOLOv26s** | **0.45987** | **4.35** | **229.7** | **63.43** | **15.77** |
+| YOLOv26l | 0.46853 | 19.32 | 51.8 | 298.69 | 3.35 |
+
+YOLOv26l has the highest validation mAP, but YOLOv26s is the deployment
+Pareto choice: it is close to the accuracy ceiling while remaining practical
+for real-time GPU use and edge CPU fallback. YOLOv26n is faster, but gives up
+accuracy for the target operating point.
+
+## Ablation and error analysis
+
+- **Regularization:** YOLOv26s tuning used weight decay, dropout, and label
+  smoothing. The best validation mAP@50-95 improved from **0.4599 to 0.4653**
+  (+0.0054), while mAP@50 changed from 0.7964 to 0.7944.
+- **Temporal filtering:** a 5-frame buffer with 4 required hazard hits prevents
+  single-frame background artifacts from becoming alerts.
+- **Test split:** the tuned model achieved mAP@50 **0.7933** and mAP@50-95
+  **0.4543** on the held-out test evaluation. Smoke was stronger than fire,
+  with per-class mAP@50-95 of 0.5248 and 0.3838 respectively.
+
+Selected plots:
+
+![Tuned confusion matrix](assets/yolo26s_tuned_confusion_matrix.png)
+![Tuned precision-recall curve](assets/yolo26s_tuned_BoxPR_curve.png)
+![Tuned training results](assets/yolo26s_tuned_results.png)
+
+## Quickstart
+
+The project uses `uv` for reproducible environment management:
 
 ```powershell
-python -m pip install kagglehub
+uv venv
+uv pip install --python .venv\Scripts\python.exe -r requirements.txt
+Copy-Item .env.example .env
+uv run --python .venv\Scripts\python.exe deploy_detector.py --source data\sample_videos\sample_fire3.mp4 --no-gui --save
 ```
 
-## Run detection
-
-From the repository root, launch the interactive source selector:
+The shortest interactive command is:
 
 ```powershell
-python .\Project\deploy_detector.py
+uv run --python .venv\Scripts\python.exe deploy_detector.py
 ```
 
-Or pass an input directly:
+Interactive mode keeps the model loaded after a video ends or the HUD closes.
+It asks whether to select another video, webcam, or stream, so the GPU warm-up
+only happens once per process. Passing `--source` remains one-shot and exits
+after that source finishes.
 
-```powershell
-# Process a sample video and save the annotated result
-python .\Project\deploy_detector.py --source ".\Project\Video Deploy\Source\sample_fire3.mp4" --save
+Live camera and RTSP/HTTP sources use a threaded latest-frame capture mode that
+drains OpenCV's FIFO buffer to avoid CPU/Docker latency. Local MP4, AVI, and MKV
+inputs remain in sequential frame-by-frame mode.
 
-# Use the default webcam
-python .\Project\deploy_detector.py --source 0
+Useful options:
 
-# Connect to an IP camera stream
-python .\Project\deploy_detector.py --source "rtsp://camera-address/stream"
-
-# Run without a preview window (saves output video)
-python .\Project\deploy_detector.py --source ".\Project\Video Deploy\Source\sample_fire3.mp4" --no-gui
+```text
+--model PATH          Custom ONNX or PyTorch weights
+--source SOURCE       Video path, webcam index, or RTSP/HTTP URL
+--conf VALUE          Detection confidence (default: 0.10)
+--buffer FRAMES       Temporal window size (default: 5)
+--hits COUNT          Required detections in the window (default: 4)
+--cooldown SECONDS    Minimum alert interval (default: 60)
+--save                Write an annotated MP4 to data/outputs/videos/
+--enable-alerts       Enable configured Telegram delivery
+--no-gui              Disable the Tkinter HUD
 ```
 
-The deployment script automatically looks for `Project/Video Deploy/Models/yolo26s_best.onnx`. To use different weights, pass `--model` with a `.onnx` or `.pt` file:
+## Configuration and integrations
 
-```powershell
-python .\Project\deploy_detector.py --model ".\path\to\weights.pt" --source ".\Project\Video Deploy\Source\sample_fire3.mp4"
-```
+Copy `.env.example` to `.env`. Telegram delivery requires
+`TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`. The AWS and Gemini variables are
+reserved for the optional `_upload_to_s3()`, `_publish_sns_or_webhook()`, and
+`_verify_with_vlm()` hooks in `src/notifier.py`; they are disabled by default.
+Never commit `.env` or credentials.
 
-### Command-line options
+## Research notebook
 
-| Option                 | Default                | Description                                                                              |
-| ---------------------- | ---------------------- | ---------------------------------------------------------------------------------------- |
-| `--model PATH`       | Automatically selected | Path to custom ONNX or PyTorch weights.                                                  |
-| `--source SOURCE`    | Interactive selection  | Video path, webcam index such as `0`, or RTSP/HTTP stream URL.                         |
-| `--conf VALUE`       | `0.10`               | Minimum detection confidence, from `0` to `1`.                                       |
-| `--buffer FRAMES`    | `5`                  | Number of recent frames used to confirm a hazard.                                        |
-| `--hits COUNT`       | `4`                  | Detections in the buffer required to confirm a hazard.                                   |
-| `--cooldown SECONDS` | `60`                 | Minimum interval between alerts.                                                         |
-| `--save`             | Off                    | Save an annotated output video. Headless (`--no-gui`) mode saves output automatically. |
-| `--enable-alerts`    | Off                    | Send confirmed hazard alerts to Telegram.                                                |
-| `--no-gui`           | Off                    | Run without opening a preview window.                                                    |
+Open `notebooks/DL_Term_Project_Notebook.ipynb` for dataset exploration,
+controlled YOLOv8s/v11s/v12s/v26n/v26s/v26l comparisons, regularization
+experiments, GPU and four-thread CPU benchmarks, and held-out test evaluation.
+The dataset is not included in this repository.
 
-Annotated videos are written to `Project/Video Deploy/Output/`. When an alert is triggered, a snapshot is saved to `Project/Video Deploy/Alerts_Log/`. The detector uses a rolling window to avoid triggering on a single-frame detection.
+## Safety
 
-### Telegram alerts
-
-Alerts are printed and snapshots are saved locally by default. To also send Telegram photo alerts, set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in the environment and pass `--enable-alerts`. For example, in PowerShell:
-
-```powershell
-$env:TELEGRAM_BOT_TOKEN = "your-bot-token"
-$env:TELEGRAM_CHAT_ID = "your-chat-id"
-python .\Project\deploy_detector.py --source ".\Project\Video Deploy\Source\sample_fire3.mp4" --enable-alerts
-```
-
-Keep bot tokens private; do not commit credentials to the repository.
-
-## Training and evaluation
-
-Open `Project/DL_Term_Project_Notebook.ipynb` in Jupyter or VS Code and run its cells in order. The notebook covers exploratory data analysis, preprocessing and augmentation, YOLO baseline comparisons, hyperparameter tuning, and evaluation on a held-out test set.
-
-The notebook downloads the smoke-and-fire dataset with KaggleHub (`sayedgamal99/smoke-fire-detection-yolo`). Install `kagglehub` first, and update any dataset or output paths in the notebook to match your environment before running training and evaluation cells. Training requires the dataset and can require substantial time and compute; a GPU is recommended.
-
-## Notes
-
-- The deployment application is intended for demonstration and experimentation. Do not rely on its predictions as the sole means of fire or smoke detection or emergency response.
-- Model accuracy and detection speed depend on the model weights, input, hardware, and confidence settings.
+This is a research and portfolio deployment demonstration. Do not use its
+predictions as the sole means of fire detection, emergency response, or life
+safety.

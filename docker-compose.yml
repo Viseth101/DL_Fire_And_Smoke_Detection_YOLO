@@ -1,0 +1,11 @@
+services:
+  fire-detector:
+    build: .
+    container_name: yolo-fire-detector
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+    # Override 'command' below to test a sample video or an IP camera URL
+    command: ["--source", "data/sample_videos/sample_fire3.mp4", "--cooldown", "30"]

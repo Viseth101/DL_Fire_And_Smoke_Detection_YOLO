@@ -1,2 +1,15 @@
 .env
-/_pycache__/
+.venv/
+Project/.venv/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+
+# Generated deployment outputs
+data/outputs/
+
+# Training runs and heavyweight checkpoints
+runs/
+Project/runs/
+*.pt
+!models/yolo26s_best.pt
