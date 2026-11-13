@@ -3,8 +3,8 @@
 Production-oriented computer vision deployment for detecting **smoke** and **fire**
 in CCTV, drone, and edge-camera video. The project began as a university deep
 learning benchmark and is now organized as a portable inference service with an
-ONNX model, temporal alert filtering, asynchronous notifications, and extension
-points for AWS and VLM verification.
+ONNX model, temporal alert filtering, and an asynchronous Telegram and AWS
+incident pipeline.
 
 ## Why this matters
 
@@ -18,13 +18,14 @@ noise without changing the model weights.
 
 ```mermaid
 flowchart LR
-    A[Video stream<br/>file, webcam, RTSP] --> B[YOLOv26s ONNX]
-    B --> C[K-of-N temporal buffer]
-    C -->|confirmed hazard| D[Async Alert Dispatcher]
-    D --> E[Local snapshot + video output]
-    D --> F[Telegram webhook]
-    D -. optional .-> G[AWS S3 / SNS / webhook]
-    D -. optional .-> H[Gemini Flash VLM verification]
+    A[Video stream<br/>file, webcam, RTSP] --> B[LatestFrameCapture<br/>zero-latency live reader]
+    B --> C[YOLOv26s ONNX]
+    C --> D[K-of-N temporal buffer]
+    D -->|confirmed hazard| E[Async Alert Dispatcher]
+    E --> F[Local snapshot + video output]
+    E --> G[Telegram + S3 upload]
+    G --> H[24-hour presigned URL]
+    E --> I[Amazon SNS incident fan-out]
 ```
 
 ## Repository layout
@@ -34,7 +35,7 @@ flowchart LR
 | `deploy_detector.py` | Root CLI entry point |
 | `src/config.py` | Portable paths, defaults, and `.env` loading |
 | `src/detector.py` | YOLO inference and K-of-N temporal buffering |
-| `src/notifier.py` | Threaded Telegram dispatcher and AWS/VLM hooks |
+| `src/notifier.py` | Threaded Telegram, S3, and SNS incident dispatcher |
 | `src/gui.py` | Cross-platform Tkinter live HUD |
 | `models/` | Deployment ONNX and PyTorch weights |
 | `data/sample_videos/` | Small local inputs for demonstrations |
@@ -124,10 +125,25 @@ Useful options:
 ## Configuration and integrations
 
 Copy `.env.example` to `.env`. Telegram delivery requires
-`TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`. The AWS and Gemini variables are
-reserved for the optional `_upload_to_s3()`, `_publish_sns_or_webhook()`, and
-`_verify_with_vlm()` hooks in `src/notifier.py`; they are disabled by default.
-Never commit `.env` or credentials.
+`TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`. AWS delivery uses the standard
+`boto3` credential chain plus `AWS_REGION`, `AWS_S3_BUCKET`, and
+`AWS_SNS_TOPIC_ARN`. Each confirmed alert is uploaded to S3 under a
+date-partitioned `incidents/YYYY-MM-DD/` key, then published to SNS with the
+S3 URI and a 24-hour presigned URL. The URL is also appended to the Telegram
+caption when both integrations are active. Never commit `.env` or credentials.
+
+## MLOps alert pipeline
+
+The Docker-compatible deployment path uses `LatestFrameCapture` to drain live
+camera/RTSP buffers in a daemon thread while preserving sequential file reads.
+`AlertDispatcher` then performs local snapshot persistence and asynchronous
+fan-out to Telegram, Amazon S3, and Amazon SNS. AWS failures are logged inside
+the background worker and do not terminate video inference.
+
+## Future work
+
+Optional VLM verification can be added later as a separate false-alarm
+verification stage after the deterministic detector and cloud alert pipeline.
 
 ## Research notebook
 

@@ -25,6 +25,12 @@ DEFAULT_SAVE_VIDEO = False
 
 load_dotenv(ROOT_DIR / ".env")
 
+AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
+AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+AWS_REGION = os.getenv("AWS_REGION", "ap-southeast-1")
+AWS_S3_BUCKET = os.getenv("AWS_S3_BUCKET")
+AWS_SNS_TOPIC_ARN = os.getenv("AWS_SNS_TOPIC_ARN")
+
 
 def get_env(name: str, default: str | None = None) -> str | None:
     """Return an environment value after loading the repository .env file."""
