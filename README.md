@@ -6,6 +6,13 @@ learning benchmark and is now organized as a portable inference service with an
 ONNX model, temporal alert filtering, and an asynchronous Telegram and AWS
 incident pipeline.
 
+## Demo
+
+<video controls width="800">
+  <source src="assets/demo.mp4" type="video/mp4">
+  Your browser does not support embedded video. [Watch the deployment demo](assets/demo.mp4).
+</video>
+
 ## Why this matters
 
 Frame-by-frame detectors can repeatedly flag a static background artifact. In
@@ -14,35 +21,40 @@ deployment testing. A K-of-N temporal persistence filter requires a hazard to
 appear consistently across recent frames before notifying an operator, reducing
 noise without changing the model weights.
 
-## Architecture
+## 🏗️ Hybrid Edge-to-Cloud System Architecture
+
+This system uses an **Edge-First, Cloud-Event** design to eliminate continuous 24/7 video bandwidth costs while maintaining centralized cloud incident logging and multi-channel alerting:
 
 ```mermaid
 flowchart LR
-    A[Video stream<br/>file, webcam, RTSP] --> B[LatestFrameCapture<br/>zero-latency live reader]
-    B --> C[YOLOv26s ONNX]
-    C --> D[K-of-N temporal buffer]
-    D -->|confirmed hazard| E[Async Alert Dispatcher]
-    E --> F[Local snapshot + video output]
-    E --> G[Telegram + S3 upload]
-    G --> H[24-hour presigned URL]
-    E --> I[Amazon SNS incident fan-out]
+    subgraph Edge ["🐳 Dockerized Edge Node (Local CPU / GPU)"]
+        A["🎥 Video / RTSP Stream"] --> B["⚡ LatestFrameCapture\n(Zero-Lag Buffer Drain)"]
+        B --> C["🧠 YOLOv26s ONNX\n(640x640 Inference)"]
+        C --> D["🛡️ K-of-N Temporal Filter\n(4/5 Frame Persistence)"]
+    end
+
+    subgraph Cloud ["☁️ AWS Cloud & Alert Fan-Out (Async Thread)"]
+        D -- "Hazard Confirmed\n(60s Cooldown)" --> E["📦 Amazon S3\n(Private Bucket + 24h Presigned URL)"]
+        E --> F["📢 Amazon SNS\n(Email / SMS / Webhook Fan-out)"]
+        E --> G["📱 Telegram Bot API\n(Instant Photo + Presigned Link)"]
+    end
 ```
 
 ## Repository layout
 
-| Path | Purpose |
-| --- | --- |
-| `deploy_detector.py` | Root CLI entry point |
-| `src/config.py` | Portable paths, defaults, and `.env` loading |
-| `src/detector.py` | YOLO inference and K-of-N temporal buffering |
-| `src/notifier.py` | Threaded Telegram, S3, and SNS incident dispatcher |
-| `src/gui.py` | Cross-platform Tkinter live HUD |
-| `models/` | Deployment ONNX and PyTorch weights |
-| `data/sample_videos/` | Small local inputs for demonstrations |
-| `data/outputs/` | Generated videos and alert snapshots (ignored by Git) |
-| `results/runs_summary/` | Lightweight experiment evidence |
-| `assets/` | README-ready evaluation plots |
-| `notebooks/` | Research, training, benchmarking, and evaluation notebook |
+| Path                      | Purpose                                                   |
+| ------------------------- | --------------------------------------------------------- |
+| `deploy_detector.py`    | Root CLI entry point                                      |
+| `src/config.py`         | Portable paths, defaults, and `.env` loading            |
+| `src/detector.py`       | YOLO inference and K-of-N temporal buffering              |
+| `src/notifier.py`       | Threaded Telegram, S3, and SNS incident dispatcher        |
+| `src/gui.py`            | Cross-platform Tkinter live HUD                           |
+| `models/`               | Deployment ONNX and PyTorch weights                       |
+| `data/sample_videos/`   | Small local inputs for demonstrations                     |
+| `data/outputs/`         | Generated videos and alert snapshots (ignored by Git)     |
+| `results/runs_summary/` | Lightweight experiment evidence                           |
+| `assets/`               | README-ready evaluation plots                             |
+| `notebooks/`            | Research, training, benchmarking, and evaluation notebook |
 
 ## Benchmark results
 
@@ -51,14 +63,14 @@ GPU results were measured on an RTX 5060 Laptop GPU; CPU results used four
 threads, batch size one, and 640px input. Total latency includes preprocessing,
 inference, and post-processing.
 
-| Model | mAP@50-95 | GPU latency (ms) | GPU FPS | 4-thread CPU latency (ms) | CPU FPS |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| YOLOv8s | 0.44614 | 4.18 | 239.3 | 72.47 | 13.80 |
-| YOLOv11s | 0.45594 | 4.03 | 248.0 | 60.07 | 16.65 |
-| YOLOv12s | 0.45620 | 5.10 | 195.9 | 80.78 | 12.38 |
-| YOLOv26n | 0.44571 | 2.22 | 449.7 | 22.92 | 43.62 |
-| **YOLOv26s** | **0.45987** | **4.35** | **229.7** | **63.43** | **15.77** |
-| YOLOv26l | 0.46853 | 19.32 | 51.8 | 298.69 | 3.35 |
+| Model              |         mAP@50-95 | GPU latency (ms) |         GPU FPS | 4-thread CPU latency (ms) |         CPU FPS |
+| ------------------ | ----------------: | ---------------: | --------------: | ------------------------: | --------------: |
+| YOLOv8s            |           0.44614 |             4.18 |           239.3 |                     72.47 |           13.80 |
+| YOLOv11s           |           0.45594 |             4.03 |           248.0 |                     60.07 |           16.65 |
+| YOLOv12s           |           0.45620 |             5.10 |           195.9 |                     80.78 |           12.38 |
+| YOLOv26n           |           0.44571 |             2.22 |           449.7 |                     22.92 |           43.62 |
+| **YOLOv26s** | **0.45987** |   **4.35** | **229.7** |           **63.43** | **15.77** |
+| YOLOv26l           |           0.46853 |            19.32 |            51.8 |                    298.69 |            3.35 |
 
 YOLOv26l has the highest validation mAP, but YOLOv26s is the deployment
 Pareto choice: it is close to the accuracy ceiling while remaining practical
