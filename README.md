@@ -159,7 +159,7 @@ verification stage after the deterministic detector and cloud alert pipeline.
 Open `notebooks/DL_Term_Project_Notebook.ipynb` for dataset exploration,
 controlled YOLOv8s/v11s/v12s/v26n/v26s/v26l comparisons, regularization
 experiments, GPU and four-thread CPU benchmarks, and held-out test evaluation.
-The dataset is not included in this repository.
+The dataset is not included in this repository. Training used the Kaggle [Smoke-Fire-Detection-YOLO](https://www.kaggle.com/datasets/sayedgamal99/smoke-fire-detection-yolo) dataset (sayedgamal99), which is based on D-Fire; credit to the dataset authors.
 
 ## Safety
 
