@@ -78,7 +78,8 @@ accuracy for the target operating point.
 
 - **Regularization:** YOLOv26s tuning used weight decay, dropout, and label
   smoothing. The best validation mAP@50-95 improved from **0.4599 to 0.4653**
-  (+0.0054), while mAP@50 changed from 0.7964 to 0.7944.
+  (+0.0054), while mAP@50 changed from 0.7964 to 0.7944. Validation recall
+  rose from 0.7335 to 0.7469 and precision moved from 0.7947 to 0.7894.
 - **Temporal filtering:** a 5-frame buffer with 4 required hazard hits prevents
   single-frame background artifacts from becoming alerts.
 - **Test split:** the tuned model achieved mAP@50 **0.7933** and mAP@50-95
